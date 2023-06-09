@@ -1,157 +1,166 @@
 from typing import Optional, Union, List, Tuple
 
+import math
 import gymnasium as gym
-from gymnasium import spaces
-import pygame
+#from gymnasium import spaces
+#import pygame
 import numpy as np
-from gymnasium.core import RenderFrame, ActType, ObsType
-from gymnasium.spaces import Box, Discrete
-from gym_onkorobot.core.actions import Actions
+import pygame
+from gymnasium.core import RenderFrame, ActType, ObsType, Env
+from gymnasium.spaces import Box, Discrete, Dict
+
+from dataclasses import fields
+
+from gymnasium import spaces
+
+from gym_onkorobot.core.mission import MissionSpace
+from gym_onkorobot.utils.voxel import Voxel
 from gym_onkorobot.utils.window import Window
+from gym_onkorobot.core.actions import Actions
+from gym_onkorobot.core.observation import Observation
+from gym_onkorobot.core.configs import GridConfig, ObservationConfig
 
-ACTION_SHAPE = (3, 1)
 
+class OnkoRobotEnv(Env):
 
-class OnkoRobotEnv(gym.Env):
-    metadata = {"render_modes": ["human"], "render_fps": 4}
+    metadata = {
+        "render_modes": ["human", "rgb_array"],
+        "render_fps": 10,
+    }
 
     def __init__(self,
-                 max_steps: int = 100,
-                 render_mode=None,
-                 point_cloud=None):
-        # TODO:
+                 render_mode: str = None,
+                 max_steps: int = 5000,
+                 screen_size_x: int = 1024,
+                 screen_size_y: int = 768,
+                 grid_config: GridConfig = GridConfig(),
+                 obs_config: ObservationConfig = ObservationConfig(),
+                 mission_space: MissionSpace = MissionSpace()):
+
         self.max_steps = max_steps
-        self.max_steps = None
-        self.step_count = 0
-        cloud_space = spaces.Box(
+        self.render_mode = render_mode
+        self.screen_size_x = screen_size_x
+        self.screen_size_y = screen_size_y
+        self.clock = None
+        self.actions = Actions
+        self.action_space = Discrete(len(self.actions))
+        self.reward = 0
+        self.tmp_count = 0
+        self.counts = {}
+
+        self.mission = ""
+
+        self.obs = Observation(grid_config=grid_config, config=obs_config)
+        print(self.obs.get_grid())
+
+        cloud_space = Box(
             low=0,
             high=255,
-            shape=(100, 100, 100, 3),
-            dtype="uint8",
+            shape=(7, 7, 3),
+            dtype="int64",
         )
-        self.observation_space = spaces.Dict({"cloud": cloud_space})
-        # action description
-        self.actions = Actions
-        self.action_space = spaces.Discrete(len(self.actions))
 
-        self.reward_range = (0, 1)
+        self.observation_space = Dict(
+            {
+                "image": cloud_space,
+   #             "direction": spaces.Discrete(4),
+                "mission": mission_space
+            }
+        )
+        self.step_count = 0
+        self.window = None
 
-        assert render_mode is None or render_mode in self.metadata["render_modes"]
-        self.render_mode = render_mode
+    def step(self, action):
 
-        """
-        If human-rendering is used, `self.window` will be a reference
-        to the window that we draw to. `self.clock` will be a clock that is used
-        to ensure that the environment is rendered at the correct framerate in
-        human-mode. They will remain `None` until human-mode is used for the
-        first time.
-        """
-        self.window: Optional[Window] = None
-        self.clock = None
-        # init grid
-
-    def step(self, action: Actions) -> Tuple[ObsType, float, bool, bool, dict]:
+        # print(f"SC: [{self.step_count}]")
         self.step_count += 1
         reward = 0
         terminated = False
         truncated = False
-        obs = self.gen_obs()
 
-        if action == self.actions.down:
-            pass
-        elif action == self.actions.up:
-            pass
+        # if action == self.actions.left:
+        #     self.obs.agent_dir -= 1
+        #     if self.obs.agent_dir < 0:
+        #         self.obs.agent_dir += 4
+        # elif action == self.actions.right:
+        #     self.obs.agent_dir = (self.obs.agent_dir + 1) % 4
+        # elif action == self.actions.move:
+        #     self.reward += self.obs.move()
+        if action == self.actions.forward:
+            self.reward += self.obs.move((1, 0))
+        elif action == self.actions.backward:
+            self.reward += self.obs.move((-1, 0))
         elif action == self.actions.left:
-            pass
+            self.reward += self.obs.move((0, 1))
         elif action == self.actions.right:
-            pass
-        elif action == self.actions.forward:
-            pass
+            self.reward += self.obs.move((0, -1))
         elif action == self.actions.dose:
-            pass
-        elif action == self.actions.done:
-            raise NotImplemented
+            self.reward += self.obs.dose()
+        # elif action == self.actions.done:
+        #    pass
         else:
             raise ValueError(f"Unknown action: {action}")
 
-        if self.step_count >= self.max_steps:
+        #corner = self.obs.grid.get_start_point(6, 6)
+        #print(corner)
+        #print(self.obs.agent_pos)
+        #print("________________-")
+        if self.step_count >= self.max_steps or self.obs.grid.is_healed():
             truncated = True
+            reward = self._reward()
 
+        #print(self.step_count)
+        #print(action)
+        #print(self.obs.grid._infected_cells_count)
+        obs = {
+            "image": self.obs.get_grid(),
+    #        "direction": self.obs.agent_dir,
+            "mission": self.mission
+        }
+
+        # if self.render_mode == "human":
+        #     self.render()
+
+        # Tuple based on which we index the counts
+        # We use the position after an update
+        tup = (self.obs.agent_pos[0], self.obs.agent_pos[1])
+
+        # Get the count for this key
+        pre_count = 0
+        if tup in self.counts:
+            pre_count = self.counts[tup]
+
+        # Update the count for this key
+        new_count = pre_count + 1
+        self.counts[tup] = new_count
+
+        bonus = 1 / (new_count**2)
+        reward += bonus
+
+       # print(f"STEP: {self.step_count}, rew: {reward}")
         return obs, reward, terminated, truncated, {}
 
-    def render(self) -> Optional[Union[RenderFrame, List[RenderFrame]]]:
-        pass
+    def render(self, num = 1):
+        v, c = self.obs.grid.render_encode()
+        c[self.obs.agent_pos[0]][self.obs.agent_pos[1]][self.obs.agent_pos[2]] = "#111111"
+        w = Window(v, c)
+        w.save_plot(self.step_count,num)
 
-    def reset(
-            self,
-            *,
-            seed: Optional[int] = None,
-            options: Optional[dict] = None,
-    ) -> Tuple[ObsType, dict]:
+    def reset(self,
+              *,
+              seed: int | None = None,
+              options: dict | None = None) -> tuple[ObsType, dict]:
+        self.obs.reset()
         self.step_count = 0
+        self.reward = 0
 
+        obs = {
+            "image": self.obs.get_grid(),
+     #       "direction": self.obs.agent_dir,
+            "mission": self.mission
+        }
 
-    # def _get_obs(self):
-    #     # TODO: return point cloud
-    #     return {"agent": self._agent_location, "target": self._target_location}
-    #
-    # def _get_info(self):
-    #     # return some usefull information
-    #     return {
-    #         "distance": np.linalg.norm(
-    #             self._agent_location - self._target_location, ord=1
-    #         )
-    #     }
-    #
-    # def reset(self, seed=None, options=None):
-    #     # We need the following line to seed self.np_random
-    #     super().reset(seed=seed)
-    #
-    #     # Choose the agent's location uniformly at random
-    #     self._agent_location = self.np_random.integers(0, self.size, size=2, dtype=int)
-    #
-    #     # We will sample the target's location randomly until it does not coincide with the agent's location
-    #     self._target_location = self._agent_location
-    #     while np.array_equal(self._target_location, self._agent_location):
-    #         self._target_location = self.np_random.integers(
-    #             0, self.size, size=2, dtype=int
-    #         )
-    #
-    #     observation = self._get_obs()
-    #     info = self._get_info()
-    #
-    #     if self.render_mode == "human":
-    #         self._render_frame()
-    #
-    #     return observation, info
-    #
-    # def step(self, action):
-    #     # Map the action (element of {0,1,2,3}) to the direction we walk in
-    #     direction = self._action_to_direction[action]
-    #     # We use `np.clip` to make sure we don't leave the grid
-    #     self._agent_location = np.clip(
-    #         self._agent_location + direction, 0, self.size - 1
-    #     )
-    #     # An episode is done iff the agent has reached the target
-    #     terminated = np.array_equal(self._agent_location, self._target_location)
-    #     reward = 1 if terminated else 0  # Binary sparse rewards
-    #     observation = self._get_obs()
-    #     info = self._get_info()
-    #
-    #     if self.render_mode == "human":
-    #         self.render()
-    #
-    #     return observation, reward, terminated, False, info
-    #
-    # def render(self):
-    #     pass
-    #
-    # def close(self):
-    #     if self.window is not None:
-    #         self.window.close()
-    def close(self):
-        if self.window is not None:
-            self.window.close()
+        return obs, {}
 
-    def gen_obs(self):
-        pass
+    def _reward(self) -> float:
+        return 1 - 0.9 * (self.step_count / self.max_steps)

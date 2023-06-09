@@ -6,7 +6,5 @@ class Actions(IntEnum):
     left = 0
     right = 1
     forward = 2
-    up = 3
-    down = 4
-    dose = 5
-    done = 6
+    backward = 3
+    dose = 4
